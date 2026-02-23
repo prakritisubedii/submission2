@@ -102,13 +102,15 @@ class ModelController:
         self.discrete_mode = True
         self._inference_debug_printed = False
         self._dim_warning_printed = False
+        self.debug = os.getenv("UPS_DEBUG", "0") == "1"
         self.allow_fallback = os.getenv("UPS_ALLOW_BIMAMBA_FALLBACK", "0").strip() == "1"
         self.feature_layer_idx = int(os.getenv("UPS_FEATURE_LAYER_IDX", "-1"))
 
         ckpt_path = ZIP_ROOT / "app" / "resources" / "ckpt_step_11000_infer.pt"
         ckpt_exists = ckpt_path.exists()
-        print(f"[ModelController:init] BiMamba import ok: {BiMambaMSM is not None}")
-        print(f"[ModelController:init] checkpoint={ckpt_path} exists={ckpt_exists}")
+        if self.debug:
+            print(f"[ModelController:init] BiMamba import ok: {BiMambaMSM is not None}")
+            print(f"[ModelController:init] checkpoint={ckpt_path} exists={ckpt_exists}")
         if not ckpt_exists:
             raise FileNotFoundError(f"Missing checkpoint: {ckpt_path}")
         ckpt = self._load_checkpoint(ckpt_path)
@@ -119,11 +121,12 @@ class ModelController:
         self.num_clusters = int(cfg.get("num_clusters", 256))
         self.discrete_mode = bool(cfg.get("discrete_mode", True))
         self.OUTPUT_DIM = self.d_model
-        print(
-            "[ModelController:init] cfg d_model="
-            f"{self.d_model} num_layers={self.num_layers} num_clusters={self.num_clusters}"
-        )
-        print(f"[ModelController:init] feature_layer_idx={self.feature_layer_idx}")
+        if self.debug:
+            print(
+                "[ModelController:init] cfg d_model="
+                f"{self.d_model} num_layers={self.num_layers} num_clusters={self.num_clusters}"
+            )
+            print(f"[ModelController:init] feature_layer_idx={self.feature_layer_idx}")
         selected_device = (
             torch.device("cuda")
             if requested_device.type == "cuda" and torch.cuda.is_available()
@@ -132,7 +135,8 @@ class ModelController:
         selected_backend = "bimamba_cuda" if selected_device.type == "cuda" else "bimamba_cpu"
         if BiMambaMSM is None:
             selected_backend = "bimamba_unavailable"
-        print(f"[ModelController:init] selected backend={selected_backend} device={selected_device}")
+        if self.debug:
+            print(f"[ModelController:init] selected backend={selected_backend} device={selected_device}")
         if BiMambaMSM is None:
             err = repr(BIMAMBA_IMPORT_ERROR) if BIMAMBA_IMPORT_ERROR is not None else "unknown import error"
             raise RuntimeError(f"BiMambaMSM import failed: {err}")
@@ -149,14 +153,16 @@ class ModelController:
             self.model.lid_head = torch.nn.Linear(self.d_model, n_lids).to(self.device)
 
         missing_keys, unexpected_keys = self.model.load_state_dict(state, strict=False)
-        print(
-            "[ModelController:init] load_state_dict strict=False "
-            f"missing={len(missing_keys)} unexpected={len(unexpected_keys)}"
-        )
+        if self.debug:
+            print(
+                "[ModelController:init] load_state_dict strict=False "
+                f"missing={len(missing_keys)} unexpected={len(unexpected_keys)}"
+            )
         self._validate_checkpoint_compatibility(state, missing_keys, unexpected_keys)
         self.model.eval()
         self.backend = "bimamba_cuda" if self.device.type == "cuda" else "bimamba_cpu"
-        print(f"[ModelController:init] backend={self.backend} device={self.device}")
+        if self.debug:
+            print(f"[ModelController:init] backend={self.backend} device={self.device}")
 
         self.mel_fn = torchaudio.transforms.MelSpectrogram(
             sample_rate=self.SR,
@@ -184,11 +190,12 @@ class ModelController:
             kwargs["discrete_mode"] = self.discrete_mode
         if "num_clusters" in supported:
             kwargs["num_clusters"] = self.num_clusters
-        print(f"[ModelController:init] BiMamba ctor kwargs={kwargs}")
+        if self.debug:
+            print(f"[ModelController:init] BiMamba ctor kwargs={kwargs}")
         try:
             return BiMambaMSM(**kwargs)
         except Exception as exc:
-            if self.allow_fallback:
+            if self.allow_fallback and self.debug:
                 print(f"[ModelController:init] fallback requested but disabled by default; build error={exc!r}")
             raise RuntimeError(f"Failed to construct BiMambaMSM with kwargs={kwargs}: {exc}") from exc
 
@@ -456,7 +463,8 @@ class ModelController:
             msg += f" valid_frames={valid_frames}/{total_frames}"
         if embedding_norm is not None:
             msg += f" embedding_norm={embedding_norm:.6f}"
-        print(msg)
+        if self.debug:
+            print(msg)
         self._inference_debug_printed = True
 
     @staticmethod
