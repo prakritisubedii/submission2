@@ -374,7 +374,12 @@ class ModelController:
         return {"embedding": emb.detach().cpu().tolist()}
 
     def batch_evaluation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        items: List[Dict[str, Any]] = payload.get("items", [])
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get("items", [])
+        else:
+            raise TypeError("batch_evaluation expects dict with 'items' or a list of payload dicts")
         return {"results": [self.single_evaluation(it) for it in items]}
 
     # Backwards/alternate API name used by some Dynabench runners
