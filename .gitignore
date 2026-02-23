@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+env/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Build/submission artifacts
+*.zip
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Large checkpoints
+app/resources/*.pt

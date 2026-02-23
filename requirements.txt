@@ -1,0 +1,6 @@
+torch
+torchaudio
+numpy
+einops
+triton
+packaging
