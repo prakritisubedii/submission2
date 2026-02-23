@@ -103,6 +103,7 @@ class ModelController:
         self._inference_debug_printed = False
         self._dim_warning_printed = False
         self.allow_fallback = os.getenv("UPS_ALLOW_BIMAMBA_FALLBACK", "0").strip() == "1"
+        self.feature_layer_idx = int(os.getenv("UPS_FEATURE_LAYER_IDX", "-1"))
 
         ckpt_path = ZIP_ROOT / "app" / "resources" / "ckpt_step_11000_infer.pt"
         ckpt_exists = ckpt_path.exists()
@@ -122,6 +123,7 @@ class ModelController:
             "[ModelController:init] cfg d_model="
             f"{self.d_model} num_layers={self.num_layers} num_clusters={self.num_clusters}"
         )
+        print(f"[ModelController:init] feature_layer_idx={self.feature_layer_idx}")
         selected_device = (
             torch.device("cuda")
             if requested_device.type == "cuda" and torch.cuda.is_available()
@@ -287,6 +289,10 @@ class ModelController:
             raise RuntimeError("Backbone model is not initialized.")
         with torch.no_grad():
             x_bt80 = x_bt80.to(device=next(self.model.parameters()).device, dtype=torch.float32).contiguous()
+            if self.feature_layer_idx >= 0 and self.backend in ("bimamba_cuda", "bimamba_cpu"):
+                hidden = self._extract_intermediate_layer_reps(x_bt80)
+                hidden = torch.nan_to_num(hidden, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
+                return hidden
             forward_sig = inspect.signature(self.model.forward)
             call_kwargs: Dict[str, Any] = {}
             if "return_reps" in forward_sig.parameters:
@@ -303,6 +309,44 @@ class ModelController:
                     f"got shape={tuple(hidden.shape)}"
                 )
             return hidden
+
+    def _extract_intermediate_layer_reps(self, x_bt80: torch.Tensor) -> torch.Tensor:
+        if self.model is None:
+            raise RuntimeError("Backbone model is not initialized.")
+        if not hasattr(self.model, "backbone"):
+            raise RuntimeError("Intermediate-layer extraction requested, but model has no backbone.")
+        backbone = getattr(self.model, "backbone")
+        num_layers = len(backbone)
+        if self.feature_layer_idx < 0 or self.feature_layer_idx >= num_layers:
+            raise RuntimeError(
+                f"Invalid feature layer index {self.feature_layer_idx}; valid range is [0, {num_layers - 1}]"
+            )
+
+        hidden = x_bt80
+        if hasattr(self.model, "proj_in") and getattr(self.model, "proj_in") is not None:
+            hidden = self.model.proj_in(hidden)
+        if hasattr(self.model, "input_norm") and getattr(self.model, "input_norm") is not None:
+            hidden = self.model.input_norm(hidden)
+
+        layer_norms = getattr(self.model, "layer_norms", None)
+        for idx, layer in enumerate(backbone):
+            residual = hidden
+            layer_in = hidden
+            if layer_norms is not None and idx < len(layer_norms):
+                layer_in = layer_norms[idx](layer_in)
+            layer_out = layer(layer_in)
+            hidden = layer_out + residual.to(layer_out.dtype)
+            if idx == self.feature_layer_idx:
+                break
+
+        if hidden.ndim != 3:
+            raise RuntimeError(f"Intermediate hidden must be [B,T,D], got shape={tuple(hidden.shape)}")
+        if hidden.shape[0] != x_bt80.shape[0] or hidden.shape[1] != x_bt80.shape[1]:
+            raise RuntimeError(
+                "Intermediate hidden shape mismatch: "
+                f"expected B={x_bt80.shape[0]},T={x_bt80.shape[1]}, got shape={tuple(hidden.shape)}"
+            )
+        return hidden
 
     @staticmethod
     def _coerce_hidden_from_forward_output(out: Any) -> torch.Tensor:
@@ -405,6 +449,7 @@ class ModelController:
             return
         msg = (
             "[ModelController:inference] "
+            f"feature_layer_idx={self.feature_layer_idx} "
             f"wav_len={wav_len} mel_shape={mel_shape} hidden_shape={hidden_shape}"
         )
         if valid_frames is not None and total_frames is not None:
