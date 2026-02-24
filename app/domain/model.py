@@ -104,7 +104,7 @@ class ModelController:
         self._dim_warning_printed = False
         self.debug = os.getenv("UPS_DEBUG", "0") == "1"
         self.allow_fallback = os.getenv("UPS_ALLOW_BIMAMBA_FALLBACK", "0").strip() == "1"
-        self.feature_layer_idx = int(os.getenv("UPS_FEATURE_LAYER_IDX", "-1"))
+        self.feature_layer_idx = int(os.getenv("UPS_FEATURE_LAYER_IDX", "8"))
 
         ckpt_path = ZIP_ROOT / "app" / "resources" / "ckpt_step_11000_infer.pt"
         ckpt_exists = ckpt_path.exists()
@@ -251,12 +251,27 @@ class ModelController:
             x = self._wav_to_logmel_bt80(wav)
             reps = self._extract_backbone_reps(x)
             reps = torch.nan_to_num(reps, nan=0.0, posinf=0.0, neginf=0.0)
+            reps = self._postprocess_temporal_features(reps)
             self._maybe_print_inference_debug(
                 wav_len=int(wav.shape[-1]),
                 mel_shape=tuple(x.shape),
                 hidden_shape=tuple(reps.shape),
             )
             return reps.squeeze(0).detach().cpu().float()
+
+    @staticmethod
+    def _postprocess_temporal_features(reps_btD: torch.Tensor) -> torch.Tensor:
+        if reps_btD.ndim != 3:
+            raise RuntimeError(f"Expected rank-3 reps [B,T,D], got shape={tuple(reps_btD.shape)}")
+
+        # Temporal subsampling: 100 Hz -> 50 Hz
+        reps = reps_btD.permute(0, 2, 1)  # [B, D, T]
+        reps = F.avg_pool1d(reps, kernel_size=2, stride=2)
+        reps = reps.permute(0, 2, 1).contiguous()  # [B, T//2, D]
+
+        # Per-frame normalization across hidden dimension D
+        reps = F.layer_norm(reps, normalized_shape=(reps.size(-1),))
+        return reps
 
     def _decode_wav_b64(self, wav_b64: str) -> torch.Tensor:
         wav_bytes = base64.b64decode(wav_b64)
@@ -434,7 +449,21 @@ class ModelController:
         return {"results": [self.single_evaluation(it) for it in items]}
 
     # Backwards/alternate API name used by some Dynabench runners
-    def batch_inference(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def batch_inference(self, payload: Any) -> Any:
+        if torch.is_tensor(payload):
+            wav_batch = payload
+            if wav_batch.ndim == 1:
+                wav_batch = wav_batch.unsqueeze(0)
+            if wav_batch.ndim != 2:
+                raise ValueError(f"Expected waveform batch [B,T], got shape={tuple(wav_batch.shape)}")
+            with torch.no_grad():
+                wav = wav_batch.detach().to("cpu", dtype=torch.float32)
+                wav = torch.nan_to_num(wav, nan=0.0, posinf=1.0, neginf=-1.0)
+                x = self._wav_to_logmel_bt80(wav)
+                reps = self._extract_backbone_reps(x)
+                reps = torch.nan_to_num(reps, nan=0.0, posinf=0.0, neginf=0.0)
+                reps = self._postprocess_temporal_features(reps)
+                return reps.detach().cpu().float()
         return self.batch_evaluation(payload)
 
     def single_inference_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
